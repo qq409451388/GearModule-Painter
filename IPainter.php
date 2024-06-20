@@ -10,10 +10,17 @@ interface IPainter extends EzComponent
     /*** get info from image ***/
     public function getImageWidthPixel():int;
     public function getImageHeightPixel():int;
+    public function getAllowImageTypes():array;
 
     /*** operate image ***/
     public function scale($newWidth, $newHeight):void;
     public function scaleWithFactor(float $factor):void;
+    public function crop(int $newWidth, int $newHeight, int $startX, int $startY, int $cornerRadius = 0):void;
+    public function opacity(float $factor):void;
+
+    public function addTextLite(string $text, int $fontSize, int $startX = 0, int $startY = 0, array $rgb = [0,0,0], string $fontFilePath = ''):void;
+    public function addText(EzDrawerText $text):void;
+
     public function setBackgroundColorWhite();
     public function setBackgroundColorBlack();
     public function setBackgroundColor($red, $green, $blue);

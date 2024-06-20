@@ -9,11 +9,26 @@ class EzDrawer implements IPainter
     /**
      * @var array<EzDrawerLayer>
      */
-    private $layers = [];
+    private $layers;
+
+    /**
+     * @description  {@link IMAGETYPE_JPEG,IMAGETYPE_GIF,IMAGETYPE_PNG}
+     * @var array<int>
+     */
+    private $allowsImageTypes;
 
     /*** cache ***/
     private $cacheSourceImageWidth;
     private $cacheSourceImageHeight;
+
+    public function __construct() {
+        $this->layers = [];
+        $this->allowsImageTypes = [
+            IMAGETYPE_JPEG,
+            IMAGETYPE_GIF,
+            IMAGETYPE_PNG,
+        ];
+    }
 
     public static function createEmptyCanvas($w = 200, $h = 200) {
         $d = new EzDrawer();
@@ -24,8 +39,9 @@ class EzDrawer implements IPainter
 
     public static function createFromImage($file) {
         $d = new EzDrawer();
-        //list($w, $h) = getimagesize($file);
         $d->workResource = imagecreatefromstring(file_get_contents($file));
+        //list($w, $h) = getimagesize($file);
+
         DBC::assertNotEquals(false, $d->workResource, "[EzDrawer] Cannot create image.");
         return $d;
     }
@@ -115,6 +131,7 @@ class EzDrawer implements IPainter
         if (is_array($this->layers) && !empty($this->layers)) {
             foreach ($this->layers as $layer) {
                 $resource = $layer->resource->extruding();
+                $this->allowsImageTypes = array_intersect($layer->resource->getAllowImageTypes(), $this->allowsImageTypes);
                 imagecopyresampled($this->workResource, $resource,
                     $layer->startX, $layer->startY, 0, 0,
                     $layer->resource->getImageWidthPixel(), $layer->resource->getImageHeightPixel(),
@@ -127,6 +144,8 @@ class EzDrawer implements IPainter
 
     public function output($outputFilePath, $fileType = IMAGETYPE_JPEG):void {
         $this->extruding();
+        DBC::assertTrue(in_array($fileType, $this->allowsImageTypes, true), "[EzDrawer] Unsupport fileType, Cannot output image type.", 0, GearIllegalArgumentException::class);
+        $outputFilePath = $this->renameWithNewExtForOutput($outputFilePath, $fileType);
         switch ($fileType) {
             case IMAGETYPE_GIF:
                 imagegif($this->workResource, $outputFilePath);
@@ -138,6 +157,21 @@ class EzDrawer implements IPainter
             default:
                 imagejpeg($this->workResource, $outputFilePath);
                 break;
+        }
+        Logger::info("[EzDrawer] Output file [$outputFilePath] was created.");
+    }
+
+    private function renameWithNewExtForOutput($fileName, $targetFileType) {
+        $pathInfo = pathinfo($fileName);
+        $extension = $pathInfo['extension'];
+        switch ($targetFileType) {
+            case IMAGETYPE_GIF:
+                return EzStringUtils::replaceOnce(".".$extension, ".gif", $fileName);
+            case IMAGETYPE_PNG:
+                return EzStringUtils::replaceOnce(".".$extension, ".png", $fileName);
+            case IMAGETYPE_JPEG:
+            default:
+                return EzStringUtils::replaceOnce(".".$extension, ".jpg", $fileName);
         }
     }
 
@@ -163,4 +197,136 @@ class EzDrawer implements IPainter
         }
     }
 
+    public function getAllowImageTypes():array {
+        return $this->allowsImageTypes;
+    }
+
+    public function crop(int $newWidth, int $newHeight, int $startX, int $startY, int $cornerRadius = 0): void {
+        $croppedImage = imagecreatetruecolor($newWidth, $newHeight);
+
+        // 将源图像的指定区域复制到裁剪后的图像中
+        imagecopyresampled(
+            $croppedImage,         // 目标图像
+            $this->workResource,   // 源图像
+            0, 0,                  // 目标图像上的 x 和 y 坐标
+            $startX, $startY,      // 源图像上的 x 和 y 坐标
+            $newWidth, $newHeight, // 目标图像的宽度和高度
+            $newWidth, $newHeight  // 源图像的宽度和高度
+        );
+        $this->clearCacheImageWidthHeightData();
+        $this->workResource = $croppedImage;
+
+        // 如果有圆角半径，则绘制圆角矩形
+        if ($cornerRadius > 0) {
+            $cornerImage = imagecreatetruecolor($newWidth, $newHeight);
+            // 设置透明背景
+            $transparent = imagecolorallocatealpha($cornerImage, 0, 0, 0, 127);
+            imagefill($cornerImage, 0, 0, $transparent);
+            imagesavealpha($cornerImage, true);
+            $this->imagefilledroundedrect($cornerImage, $croppedImage, $newWidth, $newHeight, $cornerRadius);
+            $this->clearCacheImageWidthHeightData();
+            $this->workResource = $cornerImage;
+        }
+    }
+
+    private function imagefilledroundedrect($img, $src_img, $w, $h, $radius) {
+        $r = $radius;
+        for ($x = 0; $x < $w; $x++) {
+            for ($y = 0; $y < $h; $y++) {
+                $rgbColor = imagecolorat($src_img, $x, $y);
+                //在四角的范围内选择画
+                if (($x >= $radius && $x <= ($w - $radius)) || ($y >= $radius && $y <= ($h - $radius))) {
+                    //不在四角的范围内,直接画
+                    imagesetpixel($img, $x, $y, $rgbColor);
+                }
+                //上左
+                $y_x = $r;      //圆心X坐标
+                $y_y = $r;      //圆心Y坐标
+                if (((($x - $y_x) * ($x - $y_x) + ($y - $y_y) * ($y - $y_y)) <= ($r * $r))) {
+                    imagesetpixel($img, $x, $y, $rgbColor);
+                }
+                //上右
+                $y_x = $w - $r; //圆心X坐标
+                $y_y = $r;      //圆心Y坐标
+                if (((($x - $y_x) * ($x - $y_x) + ($y - $y_y) * ($y - $y_y)) <= ($r * $r))) {
+                    imagesetpixel($img, $x, $y, $rgbColor);
+                }
+                //下左
+                $y_x = $r;      //圆心X坐标
+                $y_y = $h - $r; //圆心Y坐标
+                if (((($x - $y_x) * ($x - $y_x) + ($y - $y_y) * ($y - $y_y)) <= ($r * $r))) {
+                    imagesetpixel($img, $x, $y, $rgbColor);
+                }
+                //下右
+                $y_x = $w - $r; //圆心X坐标
+                $y_y = $h - $r; //圆心Y坐标
+                if (((($x - $y_x) * ($x - $y_x) + ($y - $y_y) * ($y - $y_y)) <= ($r * $r))) {
+                    imagesetpixel($img, $x, $y, $rgbColor);
+                }
+            }
+        }
+    }
+
+    public function opacity(float $factor): void {
+        DBC::assertInRange("[0, 1]", $factor, "[EzDrawer] Please Input a valid opacity factor in range [0, 1], Cannot opacize the image.",
+            0, GearIllegalArgumentException::class);
+        $this->allowsImageTypes = [IMAGETYPE_PNG];
+        $width = $this->getImageWidthPixel();
+        $height = $this->getImageHeightPixel();
+        $newImage = imagecreatetruecolor($width, $height);
+
+        imagealphablending($newImage, false);
+        imagesavealpha($newImage, true);
+        $transparent = imagecolorallocatealpha($newImage, 0, 0, 0, 127);
+        imagefill($newImage, 0, 0, $transparent);
+        for ($x = 0; $x < $width; $x++) {
+            for ($y = 0; $y < $height; $y++) {
+                $color = imagecolorat($this->workResource, $x, $y);
+                $alpha = ($color >> 24) & 0x7F; // 获取Alpha值
+                $alpha = round(127 - (127 - $alpha) * $factor); // 调整Alpha值
+                $newColor = imagecolorallocatealpha($newImage, ($color >> 16) & 0xFF, ($color >> 8) & 0xFF, $color & 0xFF, $alpha);
+                imagesetpixel($newImage, $x, $y, $newColor);
+            }
+        }
+        $this->workResource = $newImage;
+    }
+
+    private function clearCacheImageWidthHeightData() {
+        $this->cacheSourceImageWidth = $this->cacheSourceImageHeight = null;
+    }
+
+    public function addText(EzDrawerText $text): void {
+        DBC::assertTrue(is_file($text->fontFilePath),
+            "[EzDrawer] Please Input a valid font file path.", 0, GearIllegalArgumentException::class);
+        $color = imagecolorallocate($this->workResource, $text->rgb[0], $text->rgb[1], $text->rgb[2]);
+
+        if (!is_null($text->backgroundRgba)) {
+            $dst = imagecreatetruecolor($text->getTextWidth(),$text->getTextHeight());
+            // todo
+            /*imagealphablending($dst, false);
+            imagesavealpha($dst, true);
+            $transparent = imagecolorallocatealpha($dst, $text->backgroundRgba[0], $text->backgroundRgba[1], $text->backgroundRgba[2], 127);
+            imagefill($dst, 0, 0, $transparent);
+            imagettftext($dst,$size,0,$x,$y,$black, $file, $content);*/
+
+        } else {
+            imagettftext($this->workResource ,$text->fontSize,0, $text->startX, $text->startY , $color, $text->fontFilePath, $text->text);
+        }
+    }
+
+    public function addTextLite(string $text, int $fontSize, int $startX = 0, int $startY = 0, array $rgb = [0,0,0], string $fontFilePath = ''): void {
+        if (empty($fontFilePath)) {
+            if (Application::isLinux()) {
+                $fontFilePath = "";
+            } else if (Application::isMac()) {
+                $fontFilePath = "/System/Library/Fonts/Helvetica.ttc";
+                $fontFilePath = "/Library/Fonts/Arial Unicode.ttf";
+            } else {
+                $fontFilePath = "C:\Windows\Fonts\simsun.ttc";
+            }
+        }
+        DBC::assertTrue(is_file($fontFilePath), "[EzDrawer] Please Input a valid font file path.", 0, GearIllegalArgumentException::class);
+        $color = imagecolorallocate($this->workResource, $rgb[0], $rgb[1], $rgb[2]);
+        imagettftext($this->workResource ,$fontSize,0, $startX, $startY , $color, $fontFilePath, $text);
+    }
 }
