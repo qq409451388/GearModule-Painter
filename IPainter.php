@@ -6,6 +6,8 @@ interface IPainter extends EzComponent
     public static function createFromImage($filePath);
     public function createLayerFromImage($filePath, int $index = -1, string $alias = null, int $startX = 0, int $startY = 0);
     public function createLayer(IPainter $painter, int $index = -1, string $alias = null, int $startX = 0, int $startY = 0);
+    public function select(int $x, int $y, int $mix = 1):EzDrawerSelector;
+    public function selectFromColor(array $rgb = []):EzDrawerSelector;
 
     /*** get info from image ***/
     public function getImageWidthPixel():int;

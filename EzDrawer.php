@@ -17,6 +17,10 @@ class EzDrawer implements IPainter
      */
     private $allowsImageTypes;
 
+    private $hasExtruding = false;
+
+    private $isRoot = true;
+
     /*** cache ***/
     private $cacheSourceImageWidth;
     private $cacheSourceImageHeight;
@@ -38,17 +42,16 @@ class EzDrawer implements IPainter
     }
 
     public static function createFromImage($file) {
-        $d = new EzDrawer();
-        $d->workResource = imagecreatefromstring(file_get_contents($file));
-        //list($w, $h) = getimagesize($file);
-
+        list($w, $h) = getimagesize($file);
+        $d = self::createEmptyCanvas($w, $h);
+        $d->createLayerFromImage($file);
         DBC::assertNotEquals(false, $d->workResource, "[EzDrawer] Cannot create image.");
         return $d;
     }
 
     /**
      * @param             $filePath
-     * @param int         $index 图层位置，值越小，位置越大，0为最大
+     * @param int         $index 图层位置，值越小，位置越低，0为最低
      * @param string|null $alias 别名
      * @param int         $startX 左上角X坐标
      * @param int         $startY 左上角Y坐标
@@ -66,7 +69,10 @@ class EzDrawer implements IPainter
             $alias = md5($filePath);
         }
         $layer->alias = $alias;
-        $resource = self::createFromImage($filePath);
+        $drawer = new self();
+        $drawer->isRoot = false;
+        $drawer->workResource = imagecreatefromstring(file_get_contents($filePath));
+        $resource = $drawer;
         $layer->resource = $resource;
         $layer->startX = $startX;
         $layer->startY = $startY;
@@ -98,6 +104,8 @@ class EzDrawer implements IPainter
         if ($h > $this->getImageHeightPixel()) {
             Logger::warn("[EzDrawer] The height pixed cant be greater than resource.");
         }
+
+        DBC::assertTrue(!$this->isRoot || $this->hasExtruding, "[EzDrawer] Cannot scale image. must not root or be extruding first!");
         $newResource = imagecreatetruecolor($w, $h);
         imagecopyresampled($newResource, $this->workResource
             , 0, 0, 0, 0, $w, $h, $this->getImageWidthPixel(), $this->getImageHeightPixel());
@@ -138,6 +146,7 @@ class EzDrawer implements IPainter
                     $layer->resource->getImageWidthPixel(), $layer->resource->getImageHeightPixel());
             }
         } else {
+            $this->hasExtruding = true;
             return $this->workResource;
         }
     }
@@ -202,6 +211,7 @@ class EzDrawer implements IPainter
     }
 
     public function crop(int $newWidth, int $newHeight, int $startX, int $startY, int $cornerRadius = 0): void {
+        DBC::assertTrue(!$this->isRoot || $this->hasExtruding, "[EzDrawer] Cannot crop image. must not root or be extruding first!");
         $croppedImage = imagecreatetruecolor($newWidth, $newHeight);
 
         // 将源图像的指定区域复制到裁剪后的图像中
@@ -270,6 +280,12 @@ class EzDrawer implements IPainter
     public function opacity(float $factor): void {
         DBC::assertInRange("[0, 1]", $factor, "[EzDrawer] Please Input a valid opacity factor in range [0, 1], Cannot opacize the image.",
             0, GearIllegalArgumentException::class);
+        if ($this->isRoot) {
+            foreach ($this->layers as $layer) {
+                $layer->resource->opacity($factor);
+            }
+            return;
+        }
         $this->allowsImageTypes = [IMAGETYPE_PNG];
         $width = $this->getImageWidthPixel();
         $height = $this->getImageHeightPixel();
@@ -328,5 +344,94 @@ class EzDrawer implements IPainter
         DBC::assertTrue(is_file($fontFilePath), "[EzDrawer] Please Input a valid font file path.", 0, GearIllegalArgumentException::class);
         $color = imagecolorallocate($this->workResource, $rgb[0], $rgb[1], $rgb[2]);
         imagettftext($this->workResource ,$fontSize,0, $startX, $startY , $color, $fontFilePath, $text);
+    }
+
+    private function colorDistance($c1, $c2) {
+        return sqrt(
+            pow(($c1[0] - $c2[0]), 2) +
+            pow(($c1[1] - $c2[1]), 2) +
+            pow(($c1[2] - $c2[2]), 2)
+        );
+    }
+
+    private function setTransparency() {
+        $transparentColor = imagecolorallocatealpha($this->workResource, 0,0,0, 127);
+        imagecolortransparent($this->workResource, $transparentColor);
+
+        imagefill($this->workResource, 0, 0, $transparentColor);
+        imagesavealpha($this->workResource, true);
+    }
+
+    private function regionGrow($x, $y, $targetColor, $threshold, &$visited) {
+        $width = $this->getImageWidthPixel();
+        $height = $this->getImageHeightPixel();
+        $queue = [[$x, $y]];
+        //$targetColor = $this->straw($x, $y);
+
+        while (count($queue) > 0) {
+            list($cx, $cy) = array_shift($queue);
+
+            if ($cx < 0 || $cy < 0 || $cx >= $width || $cy >= $height || $visited[$cy][$cx]) {
+                continue;
+            }
+
+            $currentColor = $this->straw($cx, $cy);
+            $colorDistance = $this->colorDistance($currentColor, $targetColor);
+            if ($colorDistance > $threshold) {
+                continue;
+            }
+
+            $visited[$cy][$cx] = true;
+
+            // Mark as transparent if outside the region
+            //$colorToSet = ($threshold == 0 || $this->colorDistance($currentColor, $targetColor) <= $threshold) ? $targetColor : $currentColor;
+            //imagesetpixel($this->workResource, $cx, $cy, imagecolorallocate($this->workResource, $colorToSet[0], $colorToSet[1], $colorToSet[2]));
+            array_push($queue, [$cx + 1, $cy], [$cx - 1, $cy], [$cx, $cy + 1], [$cx, $cy - 1]);
+        }
+    }
+
+    public function straw(int $x, int $y, $mix = 1) {
+        if (empty($this->layers)) {
+            return false;
+        }
+        foreach ($this->layers as $layer) {
+            if ($this->isOnThisLayer($x, $y, $layer)) {
+                $index = imagecolorat($this->workResource, $x, $y);
+                $colors = imagecolorsforindex($this->workResource, $index);
+                return [$colors['red'], $colors['green'], $colors['blue']];
+            }
+        }
+        return false;
+    }
+
+    public function select(int $x, int $y, $mix = 1):EzDrawerSelector {
+        $rgb = $this->straw($x, $y, $mix);
+        return $this->selectFromColor($rgb);
+    }
+
+    public function selectFromColor(array $rgb = [], $threshold = 0):EzDrawerSelector {
+        $width = $this->getImageWidthPixel();
+        $height = $this->getImageHeightPixel();
+        $visited = array_fill(0, $height, array_fill(0, $width, false));
+
+        for ($y = 0; $y < $height; $y++) {
+            for ($x = 0; $x < $width; $x++) {
+                if (!$visited[$y][$x]) {
+                    $this->regionGrow($x, $y, $rgb, $threshold, $visited);
+                }
+            }
+        }
+
+        $selector = new EzDrawerSelector();
+        $positions = [];
+        foreach ($visited as $y => $xList) {
+            foreach ($xList as $x => $bool) {
+                if ($bool) {
+                    $positions[] = [$x, $y];
+                }
+            }
+        }
+        $selector->selectedPositions = $positions;
+        return $selector;
     }
 }
