@@ -1,4 +1,5 @@
 <?php
+
 interface IPainter extends EzComponent
 {
     /*** load image ***/
